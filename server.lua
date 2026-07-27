@@ -558,6 +558,223 @@ local function handleUserManagement()
 	end
 end
 
+-- ===== 安装向导 =====
+local function runInstaller()
+	clearScreen()
+	print("========================================")
+	print("   ChatRoom Server 安装向导")
+	print("========================================")
+	print("")
+	print(" 欢迎使用 ChatRoom 聊天室服务器!")
+	print(" 接下来将引导您完成初始配置。")
+	print("")
+	print("========================================")
+	print("")
+	io.write(" 按回车键继续...")
+	io.read()
+
+	clearScreen()
+	print("========================================")
+	print("   步骤 1/4: 服务器名称")
+	print("========================================")
+	print("")
+	print(" 给你的服务器起个名字吧。")
+	print(" 这个名字会显示在客户端的服务器列表中。")
+	print("")
+	io.write(" 服务器名称 [ChatRoom Server]: ")
+	local name = io.read()
+	if not name or #name == 0 then
+		name = "ChatRoom Server"
+	end
+	config.serverName = name
+	print("")
+	print(" ✓ 已设置: " .. name)
+	os.sleep(0.5)
+
+	clearScreen()
+	print("========================================")
+	print("   步骤 2/4: 端口设置")
+	print("========================================")
+	print("")
+	print(" 设置服务器监听的端口号。")
+	print(" 客户端连接时需要使用相同的端口。")
+	print("")
+	io.write(" 端口号 [1488]: ")
+	local portInput = tonumber(io.read())
+	if portInput and portInput > 0 and portInput < 65536 then
+		config.port = math.floor(portInput)
+	else
+		config.port = 1488
+	end
+	print("")
+	print(" ✓ 已设置端口: " .. config.port)
+	os.sleep(0.5)
+
+	clearScreen()
+	print("========================================")
+	print("   步骤 3/4: 连接密码")
+	print("========================================")
+	print("")
+	print(" 设置连接密码，客户端需要输入正确密码")
+	print(" 才能连接到服务器。")
+	print(" 留空表示不需要密码。")
+	print("")
+	io.write(" 连接密码 [无]: ")
+	local pass = io.read()
+	config.password = pass or ""
+	print("")
+	if #config.password > 0 then
+		print(" ✓ 已设置密码")
+	else
+		print(" ✓ 无密码 (任何人都可连接)")
+	end
+	os.sleep(0.5)
+
+	clearScreen()
+	print("========================================")
+	print("   步骤 4/4: 开机自启")
+	print("========================================")
+	print("")
+	print(" 是否设置开机自动启动服务器?")
+	print(" [1] 不设置")
+	print(" [2] 使用 rc 服务自启 (推荐)")
+	print(" [3] 写入 EEPROM (高级, 需 EEPROM 组件)")
+	print("")
+	io.write(" 请选择 [1]: ")
+	local bootChoice = io.read()
+
+	if bootChoice == "2" then
+		local ok, rc = pcall(require, "rc")
+		if ok and rc then
+			-- 获取脚本路径
+			local scriptDir = filesystem.path(os.getenv("_") or "server.lua") or ""
+			if scriptDir == "" then
+				scriptDir = filesystem.get(".") and "" or ""
+			end
+			local fullPath = scriptDir .. "server.lua"
+			-- 尝试获取绝对路径
+			if not fullPath:match("^/") then
+				local curDir = os.getenv("PWD") or ""
+				if curDir ~= "" then
+					fullPath = curDir .. "/" .. fullPath
+				end
+			end
+
+			if not filesystem.exists("/etc/rc.d") then
+				filesystem.makeDirectory("/etc/rc.d")
+			end
+			local rcScript = "/etc/rc.d/chatroom"
+			local rf = io.open(rcScript, "w")
+			if rf then
+				rf:write(fullPath .. "\n")
+				rf:close()
+			end
+			pcall(function() rc.enable("chatroom") end)
+			config.autoStart = "rc"
+			print("")
+			print(" ✓ 已设置 rc 服务自启")
+		else
+			print("")
+			print(" ✗ 无法设置 rc 服务 (rc 库不可用)")
+		end
+		os.sleep(1)
+	elseif bootChoice == "3" then
+		if component.isAvailable("eeprom") then
+			clearScreen()
+			print("========================================")
+			print("   警告: 写入 EEPROM")
+			print("========================================")
+			print("")
+			print(" 这将把服务器启动代码写入 EEPROM，")
+			print(" 电脑开机后会自动运行服务器。")
+			print("")
+			print(" 注意: 这将覆盖当前 EEPROM 内容!")
+			print("")
+			io.write(" 确认写入? (yes/no): ")
+			local confirm = io.read()
+			if confirm == "yes" then
+				local eeprom = component.eeprom
+				-- 获取脚本路径
+				local scriptDir = filesystem.path(os.getenv("_") or "server.lua") or ""
+				local fullPath = scriptDir .. "server.lua"
+				if not fullPath:match("^/") then
+					local curDir = os.getenv("PWD") or ""
+					if curDir ~= "" then
+						fullPath = curDir .. "/" .. fullPath
+					end
+				end
+				local biosCode = [[
+local component = component or require("component")
+local computer = computer or require("computer")
+local bootAddress = computer.getBootAddress()
+if bootAddress then
+  local fs = component.proxy(bootAddress)
+  if fs then
+    local f = fs.open("]] .. fullPath .. [[", "r")
+    if f then
+      local content = ""
+      while true do
+        local chunk = fs.read(f, math.huge)
+        if not chunk or #chunk == 0 then break end
+        content = content .. chunk
+      end
+      fs.close(f)
+      local func, err = load(content, "server", "t", _G)
+      if func then
+        func()
+      else
+        error("Failed to load server: " .. tostring(err))
+      end
+    end
+  end
+end
+]]
+				eeprom.set(biosCode)
+				eeprom.setLabel("ChatRoom Server BIOS")
+				config.autoStart = "eeprom"
+				print("")
+				print(" ✓ 已写入 EEPROM!")
+			else
+				print("")
+				print(" 已取消")
+			end
+		else
+			print("")
+			print(" ✗ 未找到 EEPROM 组件")
+		end
+		os.sleep(1)
+	else
+		config.autoStart = "none"
+		print("")
+		print(" ✓ 未设置自启")
+		os.sleep(0.5)
+	end
+
+	saveConfig()
+
+	clearScreen()
+	print("========================================")
+	print("   安装完成!")
+	print("========================================")
+	print("")
+	print(" 服务器名称: " .. config.serverName)
+	print(" 端口:       " .. config.port)
+	print(" 密码:       " .. (#config.password > 0 and "已设置" or "无"))
+	print(" 自启方式:   " .. (config.autoStart or "none"))
+	print("")
+	print("----------------------------------------")
+	print(" 服务器地址 (给客户端连接用):")
+	print(" " .. modem.address)
+	print(" 端口: " .. config.port)
+	print("----------------------------------------")
+	print("")
+	print(" 提示: 客户端可以使用搜索功能")
+	print(" 自动找到此服务器，无需手动输入地址。")
+	print("")
+	io.write(" 按回车键启动服务器...")
+	io.read()
+end
+
 -- ===== 初始化与主循环 =====
 local function init()
 	ensureDataDir()
@@ -568,6 +785,14 @@ local function init()
 end
 
 local function main()
+	ensureDataDir()
+
+	-- 检测是否首次运行
+	local firstRun = not filesystem.exists(configPath)
+	if firstRun then
+		runInstaller()
+	end
+
 	init()
 
 	while running do
