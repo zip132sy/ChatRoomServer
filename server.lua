@@ -640,8 +640,9 @@ local function runInstaller()
 	print(" [2] 使用 rc 服务自启 (推荐)")
 	print("     不影响 OpenOS 正常使用")
 	print(" [3] 写入 EEPROM (高级, 需 EEPROM 组件)")
-	print("     ⚠  会覆盖 BIOS，开机直接运行服务器")
-	print("     ⚠  将无法进入 OpenOS 系统!")
+	print("     ✓  服务器 + OpenOS 共存")
+	print("     ✓  开机先跑服务器，退出后自动引导系统")
+	print("     ⚠  会覆盖当前 BIOS")
 	print("")
 	io.write(" 请选择 [1]: ")
 	local bootChoice = io.read()
@@ -685,16 +686,16 @@ local function runInstaller()
 		if component.isAvailable("eeprom") then
 			clearScreen()
 			print("========================================")
-			print("   ⚠⚠⚠  警告: 写入 EEPROM  ⚠⚠⚠")
+			print("   写入 EEPROM - 共存模式")
 			print("========================================")
 			print("")
-			print(" 这将把服务器启动代码写入 EEPROM，")
-			print(" 电脑开机后会直接运行服务器，")
-			print(" 而不会启动 OpenOS 系统!")
+			print(" 将写入精简版引导程序到 EEPROM：")
+			print("")
+			print(" 1. 开机自动启动聊天室服务器")
+			print(" 2. 退出服务器后自动引导 OpenOS")
+			print(" 3. 服务器出错也不会影响系统启动")
 			print("")
 			print(" 注意: 这将覆盖当前 BIOS!")
-			print(" 如需恢复 OpenOS，需要重新刷写")
-			print(" OpenOS 的 EEPROM BIOS。")
 			print("")
 			io.write(" 确认写入? (yes/no): ")
 			local confirm = io.read()
@@ -709,37 +710,45 @@ local function runInstaller()
 						fullPath = curDir .. "/" .. fullPath
 					end
 				end
-				local biosCode = [[
-local component = component or require("component")
-local computer = computer or require("computer")
-local bootAddress = computer.getBootAddress()
-if bootAddress then
-  local fs = component.proxy(bootAddress)
-  if fs then
-    local f = fs.open("]] .. fullPath .. [[", "r")
-    if f then
-      local content = ""
-      while true do
-        local chunk = fs.read(f, math.huge)
-        if not chunk or #chunk == 0 then break end
-        content = content .. chunk
-      end
-      fs.close(f)
-      local func, err = load(content, "server", "t", _G)
-      if func then
-        func()
-      else
-        error("Failed to load server: " .. tostring(err))
-      end
-    end
-  end
-end
-]]
+				-- 精简版 BIOS：先跑服务器，退出后引导磁盘系统
+				-- 服务器出错也不会影响系统引导
+				local function rf(fs, path)
+					local h = fs.open(path, "r")
+					if h then
+						local c = ""
+						for _ = 1, 9999 do
+							local d = fs.read(h, 4096)
+							if not d or #d == 0 then break end
+							c = c .. d
+						end
+						fs.close(h)
+						return c
+					end
+				end
+				local biosCode = "local C=computer local a=C.getBootAddress() " ..
+					"if a then local f=component.proxy(a) if f then " ..
+					"local function rp(p) local h=f.open(p,'r') if h then " ..
+					"local c=''for _=1,9999 do local d=f.read(h,4096) " ..
+					"if not d or#d==0 then break end c=c..d end " ..
+					"f.close(h) return c end end " ..
+					"local s=rp('" .. fullPath .. "') " ..
+					"if s then local e=load(s,'srv','t',_G) " ..
+					"if e then pcall(e) end end end end " ..
+					"-- boot os -- " ..
+					"if a then local f=component.proxy(a) if f then " ..
+					"local function rp(p) local h=f.open(p,'r') if h then " ..
+					"local c=''for _=1,9999 do local d=f.read(h,4096) " ..
+					"if not d or#d==0 then break end c=c..d end " ..
+					"f.close(h) return c end end " ..
+					"local k=rp('/init.lua')or rp('/boot/kernel.lua')or rp('/OS.lua') " ..
+					"if k then local e=load(k,'init','t',_G) " ..
+					"if e then e()end end end end"
 				eeprom.set(biosCode)
-				eeprom.setLabel("ChatRoom Server BIOS")
+				eeprom.setLabel("ChatRoom BIOS")
 				config.autoStart = "eeprom"
 				print("")
 				print(" ✓ 已写入 EEPROM!")
+				print(" (" .. #biosCode .. " 字节 / 4096 可用)")
 			else
 				print("")
 				print(" 已取消")
