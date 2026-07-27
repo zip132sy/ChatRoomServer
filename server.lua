@@ -157,6 +157,20 @@ local function broadcastSystem(text)
 	end
 end
 
+local function broadcastUserList()
+	local userList = {}
+	for _, conn in pairs(connections) do
+		if conn.loggedIn and conn.username then
+			table.insert(userList, conn.username)
+		end
+	end
+	for addr, conn in pairs(connections) do
+		if conn.loggedIn then
+			sendToClient(addr, "userlist", table.unpack(userList))
+		end
+	end
+end
+
 -- ===== 网络消息处理 =====
 local function handleMessage(eventName, localAddr, remoteAddr, port, distance, msgType, ...)
 	if port ~= config.port then return end
@@ -182,6 +196,10 @@ local function handleMessage(eventName, localAddr, remoteAddr, port, distance, m
 			sendToClient(remoteAddr, "rejected", "服务器密码错误")
 			return
 		end
+		if connections[remoteAddr] then
+			sendToClient(remoteAddr, "rejected", "该地址已连接")
+			return
+		end
 		connections[remoteAddr] = {
 			address = remoteAddr,
 			username = nil,
@@ -196,6 +214,7 @@ local function handleMessage(eventName, localAddr, remoteAddr, port, distance, m
 				broadcastSystem(connections[remoteAddr].username .. " 离开了聊天室")
 			end
 			connections[remoteAddr] = nil
+			broadcastUserList()
 		end
 
 	elseif msgType == "register" then
@@ -222,6 +241,7 @@ local function handleMessage(eventName, localAddr, remoteAddr, port, distance, m
 		connections[remoteAddr].loggedIn = true
 		sendToClient(remoteAddr, "login_ok", username)
 		broadcastSystem(username .. " 加入了聊天室")
+		broadcastUserList()
 
 	elseif msgType == "login" then
 		local username, password = ...
@@ -249,6 +269,7 @@ local function handleMessage(eventName, localAddr, remoteAddr, port, distance, m
 		connections[remoteAddr].loggedIn = true
 		sendToClient(remoteAddr, "login_ok", username)
 		broadcastSystem(username .. " 加入了聊天室")
+		broadcastUserList()
 
 	elseif msgType == "logout" then
 		if connections[remoteAddr] and connections[remoteAddr].loggedIn then
@@ -256,6 +277,7 @@ local function handleMessage(eventName, localAddr, remoteAddr, port, distance, m
 			connections[remoteAddr].loggedIn = false
 			connections[remoteAddr].username = nil
 			sendToClient(remoteAddr, "sys", "已退出登录")
+			broadcastUserList()
 		end
 
 	elseif msgType == "msg" then
