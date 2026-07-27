@@ -304,7 +304,8 @@ local function drawHeader()
 	print("========================================")
 	print("       ChatRoom Server v1.0             ")
 	print("========================================")
-	print(" 地址:   " .. modem.address:sub(1, 16) .. "...")
+	print(" 地址:")
+	print("  " .. modem.address)
 	print(" 端口:   " .. tostring(config.port))
 	print(" 名称:   " .. config.serverName)
 	print(" 密码:   " .. (config.password == "" and "(无)" or "已设置"))
@@ -712,37 +713,47 @@ local function runInstaller()
 				end
 				-- 精简版 BIOS：先跑服务器，退出后引导磁盘系统
 				-- 服务器出错也不会影响系统引导
-				local function rf(fs, path)
-					local h = fs.open(path, "r")
-					if h then
-						local c = ""
-						for _ = 1, 9999 do
-							local d = fs.read(h, 4096)
-							if not d or #d == 0 then break end
-							c = c .. d
-						end
-						fs.close(h)
-						return c
-					end
-				end
-				local biosCode = "local C=computer local a=C.getBootAddress() " ..
-					"if a then local f=component.proxy(a) if f then " ..
-					"local function rp(p) local h=f.open(p,'r') if h then " ..
-					"local c=''for _=1,9999 do local d=f.read(h,4096) " ..
-					"if not d or#d==0 then break end c=c..d end " ..
-					"f.close(h) return c end end " ..
-					"local s=rp('" .. fullPath .. "') " ..
-					"if s then local e=load(s,'srv','t',_G) " ..
-					"if e then pcall(e) end end end end " ..
-					"-- boot os -- " ..
-					"if a then local f=component.proxy(a) if f then " ..
-					"local function rp(p) local h=f.open(p,'r') if h then " ..
-					"local c=''for _=1,9999 do local d=f.read(h,4096) " ..
-					"if not d or#d==0 then break end c=c..d end " ..
-					"f.close(h) return c end end " ..
-					"local k=rp('/init.lua')or rp('/boot/kernel.lua')or rp('/OS.lua') " ..
-					"if k then local e=load(k,'init','t',_G) " ..
-					"if e then e()end end end end"
+				local biosCode = table.concat({
+					"local arg = {...}",
+					"local a = computer.getBootAddress()",
+					"if a then",
+					"  local fs = component.proxy(a)",
+					"  if fs then",
+					"    local function rp(p)",
+					"      local h = fs.open(p, 'r')",
+					"      if h then",
+					"        local d = ''",
+					"        while true do",
+					"          local ch = fs.read(h, 2048)",
+					"          if not ch or #ch == 0 then break end",
+					"          d = d .. ch",
+					"        end",
+					"        fs.close(h)",
+					"        return d",
+					"      end",
+					"    end",
+					"    -- 启动服务器",
+					"    local s = rp('" .. fullPath .. "')",
+					"    if s then",
+					"      local f = load(s, 'srv', 't', _G)",
+					"      if f then",
+					"        pcall(f)",
+					"      end",
+					"    end",
+					"    -- 引导系统",
+					"    local inp",
+					"    inp = rp('/init.lua')",
+					"    if not inp then inp = rp('/boot/kernel.lua') end",
+					"    if not inp then inp = rp('/OS.lua') end",
+					"    if inp then",
+					"      local f = load(inp, 'init', 't', _G)",
+					"      if f then f(arg[1], arg[2], arg[3]) end",
+					"    else",
+					"      error('no bootable system found')",
+					"    end",
+					"  end",
+					"end",
+				}, "\n")
 				eeprom.set(biosCode)
 				eeprom.setLabel("ChatRoom BIOS")
 				config.autoStart = "eeprom"
