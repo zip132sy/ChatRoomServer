@@ -29,6 +29,7 @@ local config = {
 	serverName = "ChatRoom Server",
 	maxConnections = 50,
 	blacklist = {},
+	broadcastShutdown = true,
 }
 
 -- ===== 状态 =====
@@ -335,7 +336,8 @@ local function drawConfigMenu()
 	print(" [3] 修改端口")
 	print(" [4] 设置最大连接数")
 	print(" [5] 管理黑名单")
-	print(" [6] 返回")
+	print(" [6] 关机重启广播: " .. (config.broadcastShutdown and "开启" or "关闭"))
+	print(" [7] 返回")
 	print("")
 	io.write(" > ")
 end
@@ -435,6 +437,11 @@ local function handleConfigMenu()
 				end
 			end
 		elseif input == "6" then
+			config.broadcastShutdown = not config.broadcastShutdown
+			saveConfig()
+			print(" 关机重启广播已" .. (config.broadcastShutdown and "开启" or "关闭") .. "!")
+			os.sleep(1)
+		elseif input == "7" then
 			break
 		end
 	end
@@ -580,7 +587,9 @@ local function main()
 			io.write(" 确认关机? (yes/no): ")
 			local confirm = io.read()
 			if confirm == "yes" then
-				broadcastSystem("服务器即将关闭")
+				if config.broadcastShutdown then
+					broadcastSystem("服务器即将关闭")
+				end
 				os.sleep(0.5)
 				running = false
 			end
@@ -588,7 +597,9 @@ local function main()
 			io.write(" 确认重启? (yes/no): ")
 			local confirm = io.read()
 			if confirm == "yes" then
-				broadcastSystem("服务器即将重启")
+				if config.broadcastShutdown then
+					broadcastSystem("服务器即将重启")
+				end
 				saveConfig()
 				saveUsers()
 				os.sleep(0.5)
