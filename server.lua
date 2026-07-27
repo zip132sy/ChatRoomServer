@@ -711,49 +711,33 @@ local function runInstaller()
 						fullPath = curDir .. "/" .. fullPath
 					end
 				end
-				-- 精简版 BIOS：先跑服务器，退出后引导磁盘系统
-				-- 服务器出错也不会影响系统引导
-				local biosCode = table.concat({
-					"local arg = {...}",
-					"local a = computer.getBootAddress()",
-					"if a then",
-					"  local fs = component.proxy(a)",
-					"  if fs then",
-					"    local function rp(p)",
-					"      local h = fs.open(p, 'r')",
-					"      if h then",
-					"        local d = ''",
-					"        while true do",
-					"          local ch = fs.read(h, 2048)",
-					"          if not ch or #ch == 0 then break end",
-					"          d = d .. ch",
-					"        end",
-					"        fs.close(h)",
-					"        return d",
-					"      end",
-					"    end",
-					"    -- 启动服务器",
-					"    local s = rp('" .. fullPath .. "')",
-					"    if s then",
-					"      local f = load(s, 'srv', 't', _G)",
-					"      if f then",
-					"        pcall(f)",
-					"      end",
-					"    end",
-					"    -- 引导系统",
-					"    local inp",
-					"    inp = rp('/init.lua')",
-					"    if not inp then inp = rp('/boot/kernel.lua') end",
-					"    if not inp then inp = rp('/OS.lua') end",
-					"    if inp then",
-					"      local f = load(inp, 'init', 't', _G)",
-					"      if f then f(arg[1], arg[2], arg[3]) end",
-					"    else",
-					"      error('no bootable system found')",
-					"    end",
-					"  end",
-					"end",
-				}, "\n")
+				-- BIOS：与OpenOS官方BIOS风格完全一致
+				-- 先启动服务器，退出后引导磁盘系统
+				local biosCode =
+					"local component = component\n" ..
+					"local computer = computer\n" ..
+					"local boot = computer.getBootAddress()\n" ..
+					"local fs = component.proxy(boot)\n" ..
+					"local function loadfile(path)\n" ..
+					"  local handle, reason = fs.open(path, \"r\")\n" ..
+					"  if not handle then return nil, reason end\n" ..
+					"  local buffer = \"\"\n" ..
+					"  while true do\n" ..
+					"    local data = fs.read(handle, math.huge)\n" ..
+					"    if not data then break end\n" ..
+					"    buffer = buffer .. data\n" ..
+					"  end\n" ..
+					"  fs.close(handle)\n" ..
+					"  return load(buffer, \"=\" .. path, \"bt\", _G)\n" ..
+					"end\n" ..
+					"-- 启动服务器\n" ..
+					"local srv = loadfile(\"" .. fullPath .. "\")\n" ..
+					"if srv then pcall(srv) end\n" ..
+					"-- 引导系统\n" ..
+					"local init = loadfile(\"/init.lua\")\n" ..
+					"if not init then init = loadfile(\"/boot/kernel.lua\") end\n" ..
+					"if not init then init = loadfile(\"/OS.lua\") end\n" ..
+					"if init then init(...) else error(\"no bootable system found\") end\n"
 				eeprom.set(biosCode)
 				eeprom.setLabel("ChatRoom BIOS")
 				config.autoStart = "eeprom"
