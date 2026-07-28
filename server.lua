@@ -338,7 +338,8 @@ local function drawConfigMenu()
 	print(" [4] 设置最大连接数")
 	print(" [5] 管理黑名单")
 	print(" [6] 关机重启广播: " .. (config.broadcastShutdown and "开启" or "关闭"))
-	print(" [7] 返回")
+	print(" [7] 开机自启: " .. ((config.autoStart == "rc" or config.autoStart == true) and "开启" or "关闭"))
+	print(" [8] 返回")
 	print("")
 	io.write(" > ")
 end
@@ -443,6 +444,55 @@ local function handleConfigMenu()
 			print(" 关机重启广播已" .. (config.broadcastShutdown and "开启" or "关闭") .. "!")
 			os.sleep(1)
 		elseif input == "7" then
+			local ok, rc = pcall(require, "rc")
+			if config.autoStart == "rc" or config.autoStart == true then
+				-- 关闭自启
+				config.autoStart = "none"
+				if ok and rc then
+					pcall(function() rc.disable("chatroom") end)
+				end
+				saveConfig()
+				print(" 开机自启已关闭!")
+			else
+				-- 开启自启
+				if ok and rc then
+					-- 获取脚本路径
+					local scriptDir = filesystem.path(os.getenv("_") or "server.lua") or ""
+					local fullPath = scriptDir .. "server.lua"
+					if not fullPath:match("^/") then
+						local curDir = os.getenv("PWD") or ""
+						if curDir ~= "" then
+							fullPath = curDir .. "/" .. fullPath
+						end
+					end
+					if not filesystem.exists("/etc/rc.d") then
+						filesystem.makeDirectory("/etc/rc.d")
+					end
+					local rcScriptPath = "/etc/rc.d/chatroom"
+					local rf = io.open(rcScriptPath, "w")
+					if rf then
+						rf:write("local cfgPath = \"" .. scriptDir .. "config.cfg\"\n")
+						rf:write("local f = io.open(cfgPath, \"r\")\n")
+						rf:write("if f then\n")
+						rf:write("  local c = f:read(\"*a\")\n")
+						rf:write("  f:close()\n")
+						rf:write("  local ok, cfg = pcall(function() return load(\"return \"..c)() end)\n")
+						rf:write("  if ok and cfg and (cfg.autoStart == \"rc\" or cfg.autoStart == true) then\n")
+						rf:write("    os.execute(\"" .. fullPath .. " &\")\n")
+						rf:write("  end\n")
+						rf:write("end\n")
+						rf:close()
+					end
+					pcall(function() rc.enable("chatroom") end)
+					config.autoStart = "rc"
+					saveConfig()
+					print(" 开机自启已开启!")
+				else
+					print(" 无法设置! rc 库不可用 (需 OpenOS)")
+				end
+			end
+			os.sleep(1.5)
+		elseif input == "8" then
 			break
 		end
 	end
@@ -639,11 +689,9 @@ local function runInstaller()
 	print(" 是否设置开机自动启动服务器?")
 	print(" [1] 不设置 (手动运行)")
 	print(" [2] 使用 rc 服务自启 (推荐)")
-	print("     不影响 OpenOS 正常使用")
-	print(" [3] 写入 EEPROM (高级, 需 EEPROM 组件)")
-	print("     ✓  服务器 + OpenOS 共存")
-	print("     ✓  开机先跑服务器，退出后自动引导系统")
-	print("     ⚠  会覆盖当前 BIOS")
+	print("     ✓  不修改 BIOS，完全安全")
+	print("     ✓  主菜单中可随时开关自启")
+	print("     ✓  不影响系统正常启动")
 	print("")
 	io.write(" 请选择 [1]: ")
 	local bootChoice = io.read()
@@ -668,89 +716,39 @@ local function runInstaller()
 			if not filesystem.exists("/etc/rc.d") then
 				filesystem.makeDirectory("/etc/rc.d")
 			end
-			local rcScript = "/etc/rc.d/chatroom"
-			local rf = io.open(rcScript, "w")
+			-- rc 脚本：通过配置文件中的 autoStart 标记决定是否启动
+			local rcScriptPath = "/etc/rc.d/chatroom"
+			local rf = io.open(rcScriptPath, "w")
 			if rf then
-				rf:write(fullPath .. "\n")
+				rf:write("-- ChatRoom server rc script\n")
+				rf:write("-- 实际是否启动由服务器配置文件中的 autoStart 字段决定\n")
+				rf:write("local function loadConfig(path)\n")
+				rf:write("  local f = io.open(path, \"r\")\n")
+				rf:write("  if not f then return nil end\n")
+				rf:write("  local c = f:read(\"*a\")\n")
+				rf:write("  f:close()\n")
+				rf:write("  local ok, cfg = pcall(function() return load(\"return \"..c)() end)\n")
+				rf:write("  if ok then return cfg end\n")
+				rf:write("  return nil\n")
+				rf:write("end\n")
+				rf:write("local cfgPath = os.getenv(\"PWD\")..\"/config.cfg\"\n")
+				rf:write("if not filesystem.exists(cfgPath) then\n")
+				rf:write("  cfgPath = \"" .. scriptDir .. "config.cfg\"\n")
+				rf:write("end\n")
+				rf:write("local cfg = loadConfig(cfgPath)\n")
+				rf:write("if cfg and (cfg.autoStart == \"rc\" or cfg.autoStart == true) then\n")
+				rf:write("  os.execute(\"" .. fullPath .. " &\")\n")
+				rf:write("end\n")
 				rf:close()
 			end
 			pcall(function() rc.enable("chatroom") end)
 			config.autoStart = "rc"
 			print("")
 			print(" ✓ 已设置 rc 服务自启")
+			print(" (可在主菜单→配置中随时开关)")
 		else
 			print("")
 			print(" ✗ 无法设置 rc 服务 (rc 库不可用)")
-		end
-		os.sleep(1)
-	elseif bootChoice == "3" then
-		if component.isAvailable("eeprom") then
-			clearScreen()
-			print("========================================")
-			print("   写入 EEPROM - 共存模式")
-			print("========================================")
-			print("")
-			print(" 将写入精简版引导程序到 EEPROM：")
-			print("")
-			print(" 1. 开机自动启动聊天室服务器")
-			print(" 2. 退出服务器后自动引导 OpenOS")
-			print(" 3. 服务器出错也不会影响系统启动")
-			print("")
-			print(" 注意: 这将覆盖当前 BIOS!")
-			print("")
-			io.write(" 确认写入? (yes/no): ")
-			local confirm = io.read()
-			if confirm == "yes" then
-				local eeprom = component.eeprom
-				-- 获取脚本路径
-				local scriptDir = filesystem.path(os.getenv("_") or "server.lua") or ""
-				local fullPath = scriptDir .. "server.lua"
-				if not fullPath:match("^/") then
-					local curDir = os.getenv("PWD") or ""
-					if curDir ~= "" then
-						fullPath = curDir .. "/" .. fullPath
-					end
-				end
-				-- BIOS：与OpenOS官方BIOS风格完全一致
-				-- 先启动服务器，退出后引导磁盘系统
-				local biosCode =
-					"local component = component\n" ..
-					"local computer = computer\n" ..
-					"local boot = computer.getBootAddress()\n" ..
-					"local fs = component.proxy(boot)\n" ..
-					"local function loadfile(path)\n" ..
-					"  local handle, reason = fs.open(path, \"r\")\n" ..
-					"  if not handle then return nil, reason end\n" ..
-					"  local buffer = \"\"\n" ..
-					"  while true do\n" ..
-					"    local data = fs.read(handle, math.huge)\n" ..
-					"    if not data then break end\n" ..
-					"    buffer = buffer .. data\n" ..
-					"  end\n" ..
-					"  fs.close(handle)\n" ..
-					"  return load(buffer, \"=\" .. path, \"bt\", _G)\n" ..
-					"end\n" ..
-					"-- 启动服务器\n" ..
-					"local srv = loadfile(\"" .. fullPath .. "\")\n" ..
-					"if srv then pcall(srv) end\n" ..
-					"-- 引导系统\n" ..
-					"local init = loadfile(\"/init.lua\")\n" ..
-					"if not init then init = loadfile(\"/boot/kernel.lua\") end\n" ..
-					"if not init then init = loadfile(\"/OS.lua\") end\n" ..
-					"if init then init(...) else error(\"no bootable system found\") end\n"
-				eeprom.set(biosCode)
-				eeprom.setLabel("ChatRoom BIOS")
-				config.autoStart = "eeprom"
-				print("")
-				print(" ✓ 已写入 EEPROM!")
-				print(" (" .. #biosCode .. " 字节 / 4096 可用)")
-			else
-				print("")
-				print(" 已取消")
-			end
-		else
-			print("")
-			print(" ✗ 未找到 EEPROM 组件")
 		end
 		os.sleep(1)
 	else
