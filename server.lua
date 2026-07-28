@@ -392,66 +392,77 @@ end
 
 -- ===== 自启动核心 =====
 -- 统一使用 .shrc 方案：在 shell 启动时运行 server.lua
--- 只有一个进程，不会出现终端争抢问题
+-- .shrc 逐行执行 shell 命令，不能写多行 Lua 代码
+-- 所以 .shrc 中只写一行命令，多行逻辑放到独立脚本文件中
 
 local shrcPath = os.getenv("HOME") and (os.getenv("HOME") .. "/.shrc") or "/.shrc"
+local autostartScript = "/etc/chatroom_autostart.lua"
 local autostartTag = "chatroom_autostart"
 
--- 在 .shrc 中写入完整启动代码（不引用外部文件，避免路径问题）
-local function addToShrc(fullPath)
+-- 写启动脚本到独立文件
+local function writeAutoStartScript(fullPath)
+	local sf = io.open(autostartScript, "w")
+	if sf then
+		sf:write("-- ChatRoom server autostart\n")
+		sf:write("local cfgPath = \"/etc/chatroom/config.cfg\"\n")
+		sf:write("local srvPath = \"" .. fullPath .. "\"\n")
+		sf:write("local f = io.open(cfgPath, \"r\")\n")
+		sf:write("if f then\n")
+		sf:write("  local c = f:read(\"*a\")\n")
+		sf:write("  f:close()\n")
+		sf:write("  local ok, cfg = pcall(function() return load(\"return \"..c)() end)\n")
+		sf:write("  if ok and cfg and (cfg.autoStart == \"shrc\" or cfg.autoStart == true) then\n")
+		sf:write("    local srv = loadfile(srvPath)\n")
+		sf:write("    if srv then pcall(srv) end\n")
+		sf:write("  end\n")
+		sf:write("end\n")
+		sf:close()
+	end
+end
+
+-- 在 .shrc 中追加一行 shell 命令
+local function addToShrc()
 	local existing = ""
 	local af = io.open(shrcPath, "r")
 	if af then
 		existing = af:read("*a")
 		af:close()
 	end
-	-- 检查是否已包含引用
 	if not existing:find(autostartTag, 1, true) then
 		af = io.open(shrcPath, "a")
 		if af then
 			if #existing > 0 and not existing:sub(-1):match("[\r\n]") then
 				af:write("\n")
 			end
-			-- 直接在 .shrc 中写完整代码，不 dofile 外部文件
-			af:write("-- " .. autostartTag .. " begin\n")
-			af:write("do\n")
-			af:write("  local cfgPath = \"/etc/chatroom/config.cfg\"\n")
-			af:write("  local srvPath = \"" .. fullPath .. "\"\n")
-			af:write("  local f = io.open(cfgPath, \"r\")\n")
-			af:write("  if f then\n")
-			af:write("    local c = f:read(\"*a\")\n")
-			af:write("    f:close()\n")
-			af:write("    local ok, cfg = pcall(function() return load(\"return \"..c)() end)\n")
-			af:write("    if ok and cfg and (cfg.autoStart == \"shrc\" or cfg.autoStart == true) then\n")
-			af:write("      local srv = loadfile(srvPath)\n")
-			af:write("      if srv then pcall(srv) end\n")
-			af:write("    end\n")
-			af:write("  end\n")
-			af:write("end\n")
-			af:write("-- " .. autostartTag .. " end\n")
+			-- 只写一行 shell 命令，用 lua 执行启动脚本
+			af:write("lua " .. autostartScript .. " -- " .. autostartTag .. "\n")
 			af:close()
 		end
 	end
 end
 
--- 从 .shrc 中移除引用
+-- 从 .shrc 中移除引用行
 local function removeFromShrc()
 	local af = io.open(shrcPath, "r")
 	if not af then return end
 	local content = af:read("*a")
 	af:close()
-	-- 移除 begin 到 end 之间的代码块
-	local result = content:gsub("-- " .. autostartTag .. " begin\n.--- " .. autostartTag .. " end\n?", "")
+	local lines = {}
+	for line in content:gmatch("[^\r\n]+") do
+		if not line:find(autostartTag, 1, true) then
+			table.insert(lines, line)
+		end
+	end
 	af = io.open(shrcPath, "w")
 	if af then
-		af:write(result)
+		af:write(#lines > 0 and table.concat(lines, "\n") .. "\n" or "")
 		af:close()
 	end
 end
 
 -- 清理旧的 rc/autorun 文件
 local function cleanupOldAutoStart()
-	for _, f in ipairs({"/etc/rc.d/chatroom.lua", "/etc/rc.d/chatroom", "/etc/chatroom_autostart.lua"}) do
+	for _, f in ipairs({"/etc/rc.d/chatroom.lua", "/etc/rc.d/chatroom"}) do
 		if filesystem.exists(f) then
 			filesystem.remove(f)
 		end
@@ -483,7 +494,8 @@ end
 local function enableAutoStart()
 	local fullPath, scriptDir = getScriptPath()
 	cleanupOldAutoStart()
-	addToShrc(fullPath)
+	writeAutoStartScript(fullPath)
+	addToShrc()
 	config.autoStart = "shrc"
 	return "shrc"
 end
@@ -491,6 +503,9 @@ end
 -- 统一关闭自启
 local function disableAutoStart()
 	removeFromShrc()
+	if filesystem.exists(autostartScript) then
+		filesystem.remove(autostartScript)
+	end
 	config.autoStart = "none"
 end
 
