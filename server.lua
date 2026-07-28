@@ -538,6 +538,163 @@ local function drawHeader()
 	print("")
 end
 
+-- ===== 更新检查 =====
+local UPDATE_URLS = {
+	"https://gitee.com/zip132sy/pixelos/raw/master/ChatRoomServer/version.txt",
+	"https://raw.githubusercontent.com/zip132sy/ChatRoomServer/master/version.txt",
+}
+local UPDATE_FILE_URLS = {
+	"https://gitee.com/zip132sy/pixelos/raw/master/ChatRoomServer/server.lua",
+	"https://raw.githubusercontent.com/zip132sy/ChatRoomServer/master/server.lua",
+}
+
+-- 简单的 HTTP 请求（需要互联网卡）
+local function httpGet(url)
+	local ok, internet = pcall(require, "internet")
+	if not ok or not internet then
+		return nil, "无互联网卡"
+	end
+	local ok2, handle = pcall(internet.request, url)
+	if not ok2 or not handle then
+		return nil, "请求失败"
+	end
+	local result = ""
+	for chunk in handle do
+		result = result .. chunk
+	end
+	-- 去除尾部空白
+	result = result:gsub("^%s+", ""):gsub("%s+$", "")
+	return result
+end
+
+-- 版本号比较: 返回 true 表示 v2 > v1
+local function isNewerVersion(v1, v2)
+	local v1parts = {}
+	local v2parts = {}
+	for n in v1:gmatch("%d+") do table.insert(v1parts, tonumber(n)) end
+	for n in v2:gmatch("%d+") do table.insert(v2parts, tonumber(n)) end
+	for i = 1, math.max(#v1parts, #v2parts) do
+		local a = v1parts[i] or 0
+		local b = v2parts[i] or 0
+		if b > a then return true end
+		if b < a then return false end
+	end
+	return false
+end
+
+local function handleUpdate()
+	clearScreen()
+	print("========================================")
+	print("   检查更新")
+	print("========================================")
+	print("")
+	print(" 当前版本: v" .. VERSION)
+	print(" 正在检查更新...")
+	print("")
+
+	-- 尝试从多个源获取版本号
+	local remoteVersion = nil
+	local usedSource = 0
+	for i, url in ipairs(UPDATE_URLS) do
+		local result, err = httpGet(url)
+		if result and #result > 0 and #result < 20 then
+			remoteVersion = result
+			usedSource = i
+			break
+		end
+	end
+
+	if not remoteVersion then
+		print(" ✗ 无法检查更新")
+		print("   (需要互联网卡)")
+		print("")
+		io.write(" 按回车返回...")
+		io.read()
+		return
+	end
+
+	print(" 最新版本: v" .. remoteVersion)
+	print("")
+
+	if not isNewerVersion(VERSION, remoteVersion) then
+		print(" ✓ 已是最新版本!")
+		print("")
+		io.write(" 按回车返回...")
+		io.read()
+		return
+	end
+
+	print(" 发现新版本! v" .. VERSION .. " → v" .. remoteVersion)
+	print(" 更新内容: 下载最新的 server.lua 覆盖本地文件")
+	print(" 更新后需要重新运行 server.lua")
+	print("")
+	io.write(" 是否更新? (yes/no): ")
+	local confirm = io.read()
+	if confirm ~= "yes" then
+		print(" 已取消更新")
+		os.sleep(1)
+		return
+	end
+
+	-- 下载新版本
+	print(" 正在下载...")
+	local fullPath, scriptDir = getScriptPath()
+	local newCode = nil
+	for i, url in ipairs(UPDATE_FILE_URLS) do
+		local result, err = httpGet(url)
+		if result and #result > 100 then
+			newCode = result
+			break
+		end
+	end
+
+	if not newCode then
+		print(" ✗ 下载失败!")
+		print("   (可能是网络问题)")
+		print("")
+		io.write(" 按回车返回...")
+		io.read()
+		return
+	end
+
+	-- 备份旧文件
+	local backupPath = fullPath .. ".bak"
+	local oldFile = io.open(fullPath, "r")
+	if oldFile then
+		local oldContent = oldFile:read("*a")
+		oldFile:close()
+		local backupFile = io.open(backupPath, "w")
+		if backupFile then
+			backupFile:write(oldContent)
+			backupFile:close()
+		end
+	end
+
+	-- 写入新文件
+	local newFile = io.open(fullPath, "w")
+	if newFile then
+		newFile:write(newCode)
+		newFile:close()
+		print(" ✓ 更新成功!")
+		print(" 旧版本已备份到: " .. backupPath)
+		print(" 请重新运行 server.lua 以完成更新")
+		print("")
+		-- 保存配置
+		saveConfig()
+		saveUsers()
+		-- 广播更新消息
+		if config.broadcastShutdown then
+			broadcastSystem("服务器即将更新重启")
+		end
+		os.sleep(1)
+		-- 退出程序，让用户重新运行
+		running = false
+	else
+		print(" ✗ 写入失败!")
+		os.sleep(2)
+	end
+end
+
 local function drawMainMenu()
 	drawHeader()
 	print(" [1] 配置管理")
@@ -546,6 +703,7 @@ local function drawMainMenu()
 	print(" [4] 用户管理")
 	print(" [5] 退出服务器")
 	print(" [6] 重启")
+	print(" [7] 检查更新 (当前: v" .. VERSION .. ")")
 	print("")
 	io.write(" > ")
 end
@@ -1060,6 +1218,8 @@ local function main()
 				os.sleep(0.5)
 				computer.shutdown(true)
 			end
+		elseif input == "7" then
+			handleUpdate()
 		end
 	end
 
