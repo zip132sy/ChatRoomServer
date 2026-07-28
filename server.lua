@@ -360,6 +360,7 @@ local function getScriptPath()
 end
 
 -- 设置 rc 自启
+-- OpenOS rc 脚本格式：返回表，包含 start 函数
 local function setupRC(fullPath, scriptDir)
 	local ok, rc = pcall(require, "rc")
 	if not ok or not rc then return false end
@@ -369,38 +370,56 @@ local function setupRC(fullPath, scriptDir)
 	local rcPath = "/etc/rc.d/chatroom"
 	local rf = io.open(rcPath, "w")
 	if rf then
+		-- 配置文件固定在 /etc/chatroom/config.cfg
 		rf:write("-- ChatRoom server rc script\n")
-		rf:write("local cfgPath = \"" .. scriptDir .. "config.cfg\"\n")
-		rf:write("local f = io.open(cfgPath, \"r\")\n")
-		rf:write("if f then\n")
-		rf:write("  local c = f:read(\"*a\")\n")
-		rf:write("  f:close()\n")
-		rf:write("  local ok, cfg = pcall(function() return load(\"return \"..c)() end)\n")
-		rf:write("  if ok and cfg and (cfg.autoStart == \"rc\" or cfg.autoStart == true) then\n")
-		rf:write("    os.execute(\"" .. fullPath .. " &\")\n")
-		rf:write("  end\n")
-		rf:write("end\n")
+		rf:write("local cfgPath = \"/etc/chatroom/config.cfg\"\n")
+		rf:write("local srvPath = \"" .. fullPath .. "\"\n")
+		rf:write("return {\n")
+		rf:write("  start = function()\n")
+		rf:write("    local f = io.open(cfgPath, \"r\")\n")
+		rf:write("    if not f then return end\n")
+		rf:write("    local c = f:read(\"*a\")\n")
+		rf:write("    f:close()\n")
+		rf:write("    local ok, cfg = pcall(function() return load(\"return \"..c)() end)\n")
+		rf:write("    if not ok or not cfg then return end\n")
+		rf:write("    if cfg.autoStart == \"rc\" or cfg.autoStart == true then\n")
+		rf:write("      require(\"thread\").create(function()\n")
+		rf:write("        os.execute(srvPath)\n")
+		rf:write("      end):detach()\n")
+		rf:write("    end\n")
+		rf:write("  end,\n")
+		rf:write("  stop = function() end,\n")
+		rf:write("  status = function() return \"running\" end\n")
+		rf:write("}\n")
 		rf:close()
 	end
 	pcall(function() rc.enable("chatroom") end)
 	return true
 end
 
--- 设置 autorun 自启（通用方案）
+-- 设置 autorun 自启（通用方案，Plan9k 等）
 local function setupAutorun(fullPath, scriptDir)
 	-- 写启动脚本到单独文件
 	local scriptPath = "/etc/chatroom_autostart.lua"
 	local sf = io.open(scriptPath, "w")
 	if sf then
+		-- 配置文件固定在 /etc/chatroom/config.cfg
 		sf:write("-- ChatRoom server autostart\n")
-		sf:write("local cfgPath = \"" .. scriptDir .. "config.cfg\"\n")
+		sf:write("local cfgPath = \"/etc/chatroom/config.cfg\"\n")
+		sf:write("local srvPath = \"" .. fullPath .. "\"\n")
 		sf:write("local f = io.open(cfgPath, \"r\")\n")
 		sf:write("if f then\n")
 		sf:write("  local c = f:read(\"*a\")\n")
 		sf:write("  f:close()\n")
 		sf:write("  local ok, cfg = pcall(function() return load(\"return \"..c)() end)\n")
 		sf:write("  if ok and cfg and (cfg.autoStart == \"autorun\" or cfg.autoStart == true) then\n")
-		sf:write("    os.execute(\"" .. fullPath .. " &\")\n")
+		-- 用 thread 避免阻塞系统启动
+		sf:write("    local okt, thread = pcall(require, \"thread\")\n")
+		sf:write("    if okt and thread then\n")
+		sf:write("      thread.create(function() os.execute(srvPath) end):detach()\n")
+		sf:write("    else\n")
+		sf:write("      os.execute(srvPath)\n")
+		sf:write("    end\n")
 		sf:write("  end\n")
 		sf:write("end\n")
 		sf:close()
