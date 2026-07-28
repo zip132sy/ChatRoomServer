@@ -3,6 +3,8 @@
 -- 需要网卡组件（有线/无线/高级网卡均可）
 -- 用法: lua server.lua
 
+local VERSION = "1.0.0"
+
 local component = require("component")
 local event = require("event")
 local term = require("term")
@@ -372,60 +374,19 @@ local function getScriptPath()
 	return fullPath, scriptDir
 end
 
--- 设置 rc 自启
--- 按官方文档：/etc/rc.d/chatroom.lua，定义全局 start 函数
--- 用 loadfile 直接在当前进程中运行，避免 os.execute 创建新进程导致终端冲突
-local function setupRC(fullPath, scriptDir)
-	local ok, rc = pcall(require, "rc")
-	if not ok or not rc then return false end
-	if not filesystem.exists("/etc/rc.d") then
-		filesystem.makeDirectory("/etc/rc.d")
-	end
-	-- 文件名必须有 .lua 后缀
-	local rcPath = "/etc/rc.d/chatroom.lua"
-	local rf = io.open(rcPath, "w")
-	if rf then
-		-- 全局函数，不用 local，不返回表
-		rf:write("-- ChatRoom server rc script\n")
-		rf:write("local cfgPath = \"/etc/chatroom/config.cfg\"\n")
-		rf:write("local srvPath = \"" .. fullPath .. "\"\n")
-		rf:write("\n")
-		rf:write("function start()\n")
-		rf:write("  local f = io.open(cfgPath, \"r\")\n")
-		rf:write("  if not f then return end\n")
-		rf:write("  local c = f:read(\"*a\")\n")
-		rf:write("  f:close()\n")
-		rf:write("  local ok, cfg = pcall(function() return load(\"return \"..c)() end)\n")
-		rf:write("  if not ok or not cfg then return end\n")
-		rf:write("  if cfg.autoStart == \"rc\" or cfg.autoStart == true then\n")
-		-- 用 loadfile 而非 os.execute，直接在当前进程运行
-		-- 避免 shell 进程和 server.lua 争抢终端
-		rf:write("    local srv, err = loadfile(srvPath)\n")
-		rf:write("    if srv then\n")
-		rf:write("      pcall(srv)\n")
-		rf:write("    end\n")
-		rf:write("  end\n")
-		rf:write("end\n")
-		rf:write("\n")
-		rf:write("function stop()\n")
-		rf:write("end\n")
-		rf:close()
-	end
-	-- 删除旧的无后缀文件
-	if filesystem.exists("/etc/rc.d/chatroom") then
-		filesystem.remove("/etc/rc.d/chatroom")
-	end
-	pcall(function() rc.enable("chatroom") end)
-	return true
-end
+-- ===== 自启动核心 =====
+-- 统一使用 .shrc 方案：在 shell 启动时运行 server.lua
+-- 只有一个进程，不会出现终端争抢问题
+-- server.lua 阻塞 .shrc → shell 不启动 → 退出服务器后 shell 正常启动
 
--- 设置 autorun 自启（通用方案，Plan9k 等）
-local function setupAutorun(fullPath, scriptDir)
-	-- 写启动脚本到单独文件
-	local scriptPath = "/etc/chatroom_autostart.lua"
-	local sf = io.open(scriptPath, "w")
+-- 启动脚本路径
+local autostartScript = "/etc/chatroom_autostart.lua"
+local shrcPath = os.getenv("HOME") and (os.getenv("HOME") .. "/.shrc") or "/.shrc"
+
+-- 写启动脚本
+local function writeAutoStartScript(fullPath)
+	local sf = io.open(autostartScript, "w")
 	if sf then
-		-- 配置文件固定在 /etc/chatroom/config.cfg
 		sf:write("-- ChatRoom server autostart\n")
 		sf:write("local cfgPath = \"/etc/chatroom/config.cfg\"\n")
 		sf:write("local srvPath = \"" .. fullPath .. "\"\n")
@@ -434,67 +395,52 @@ local function setupAutorun(fullPath, scriptDir)
 		sf:write("  local c = f:read(\"*a\")\n")
 		sf:write("  f:close()\n")
 		sf:write("  local ok, cfg = pcall(function() return load(\"return \"..c)() end)\n")
-		sf:write("  if ok and cfg and (cfg.autoStart == \"autorun\" or cfg.autoStart == true) then\n")
-		-- 用 thread 避免阻塞系统启动
-		sf:write("    local okt, thread = pcall(require, \"thread\")\n")
-		sf:write("    if okt and thread then\n")
-		sf:write("      thread.create(function() os.execute(srvPath) end):detach()\n")
-		sf:write("    else\n")
-		sf:write("      os.execute(srvPath)\n")
-		sf:write("    end\n")
+		sf:write("  if ok and cfg and (cfg.autoStart == \"shrc\" or cfg.autoStart == true) then\n")
+		-- 直接 dofile，在 shell 主线程中运行，不会创建新进程
+		sf:write("    local srv = loadfile(srvPath)\n")
+		sf:write("    if srv then pcall(srv) end\n")
 		sf:write("  end\n")
 		sf:write("end\n")
 		sf:close()
 	end
-	-- 在 /autorun.lua 中添加引用（不覆盖已有内容）
-	local autorunPath = "/autorun.lua"
+end
+
+-- 在 .shrc 中添加引用
+local function addToShrc()
 	local existing = ""
-	local af = io.open(autorunPath, "r")
+	local af = io.open(shrcPath, "r")
 	if af then
 		existing = af:read("*a")
 		af:close()
 	end
-	-- 检查是否已包含引用
 	if not existing:find("chatroom_autostart", 1, true) then
-		af = io.open(autorunPath, "a")
+		af = io.open(shrcPath, "a")
 		if af then
 			if #existing > 0 and not existing:sub(-1):match("[\r\n]") then
 				af:write("\n")
 			end
-			af:write("pcall(dofile, \"/etc/chatroom_autostart.lua\")\n")
+			af:write("pcall(dofile, \"" .. autostartScript .. "\")\n")
 			af:close()
 		end
 	end
-	return true
 end
 
--- 关闭 rc 自启
-local function disableRC()
-	local ok, rc = pcall(require, "rc")
-	if ok and rc then
-		pcall(function() rc.disable("chatroom") end)
-	end
-end
-
--- 关闭 autorun 自启（从 /autorun.lua 中移除引用）
-local function disableAutorun()
-	local autorunPath = "/autorun.lua"
-	local af = io.open(autorunPath, "r")
+-- 从 .shrc 中移除引用
+local function removeFromShrc()
+	local af = io.open(shrcPath, "r")
 	if not af then return end
 	local content = af:read("*a")
 	af:close()
-	-- 移除包含 chatroom_autostart 的行
 	local lines = {}
 	for line in content:gmatch("[^\r\n]+") do
 		if not line:find("chatroom_autostart", 1, true) then
 			table.insert(lines, line)
 		end
 	end
-	local newContent = table.concat(lines, "\n")
-	af = io.open(autorunPath, "w")
+	af = io.open(shrcPath, "w")
 	if af then
-		if #newContent > 0 then
-			af:write(newContent .. "\n")
+		if #lines > 0 then
+			af:write(table.concat(lines, "\n") .. "\n")
 		else
 			af:write("")
 		end
@@ -502,27 +448,51 @@ local function disableAutorun()
 	end
 end
 
--- 统一设置自启（自动检测系统类型）
-local function enableAutoStart()
-	local method = detectAutoStartMethod()
-	local fullPath, scriptDir = getScriptPath()
-	if method == "rc" then
-		setupRC(fullPath, scriptDir)
-		config.autoStart = "rc"
-	else
-		setupAutorun(fullPath, scriptDir)
-		config.autoStart = "autorun"
+-- 清理旧的 rc/autorun 文件
+local function cleanupOldAutoStart()
+	-- 删除 rc 脚本
+	for _, f in ipairs({"/etc/rc.d/chatroom.lua", "/etc/rc.d/chatroom"}) do
+		if filesystem.exists(f) then
+			filesystem.remove(f)
+		end
 	end
-	return method
+	-- 从 rc 启用列表中移除
+	local ok, rc = pcall(require, "rc")
+	if ok and rc then
+		pcall(function() rc.disable("chatroom") end)
+	end
+	-- 从 /autorun.lua 中移除引用
+	local af = io.open("/autorun.lua", "r")
+	if af then
+		local content = af:read("*a")
+		af:close()
+		local lines = {}
+		for line in content:gmatch("[^\r\n]+") do
+			if not line:find("chatroom_autostart", 1, true) then
+				table.insert(lines, line)
+			end
+		end
+		af = io.open("/autorun.lua", "w")
+		if af then
+			af:write(#lines > 0 and table.concat(lines, "\n") .. "\n" or "")
+			af:close()
+		end
+	end
+end
+
+-- 统一设置自启
+local function enableAutoStart()
+	local fullPath, scriptDir = getScriptPath()
+	cleanupOldAutoStart()
+	writeAutoStartScript(fullPath)
+	addToShrc()
+	config.autoStart = "shrc"
+	return "shrc"
 end
 
 -- 统一关闭自启
 local function disableAutoStart()
-	if config.autoStart == "rc" then
-		disableRC()
-	elseif config.autoStart == "autorun" then
-		disableAutorun()
-	end
+	removeFromShrc()
 	config.autoStart = "none"
 end
 
@@ -540,7 +510,7 @@ local function drawHeader()
 	end
 	clearScreen()
 	print("========================================")
-	print("       ChatRoom Server v1.0             ")
+	print("       ChatRoom Server v" .. VERSION .. "          ")
 	print("========================================")
 	print(" 系统:   " .. sysDisplay)
 	print(" 地址:")
@@ -577,7 +547,7 @@ local function drawConfigMenu()
 	print(" [4] 设置最大连接数")
 	print(" [5] 管理黑名单")
 	print(" [6] 关机重启广播: " .. (config.broadcastShutdown and "开启" or "关闭"))
-	print(" [7] 开机自启: " .. (config.autoStart == "rc" and "开启 (rc)" or (config.autoStart == "autorun" and "开启 (autorun)" or "关闭")))
+	print(" [7] 开机自启: " .. (config.autoStart == "shrc" and "开启" or "关闭"))
 	print(" [8] 返回")
 	print("")
 	io.write(" > ")
@@ -683,20 +653,16 @@ local function handleConfigMenu()
 			print(" 关机重启广播已" .. (config.broadcastShutdown and "开启" or "关闭") .. "!")
 			os.sleep(1)
 		elseif input == "7" then
-			if config.autoStart == "rc" or config.autoStart == "autorun" or config.autoStart == true then
+			if config.autoStart == "shrc" or config.autoStart == true then
 				-- 关闭自启
 				disableAutoStart()
 				saveConfig()
 				print(" 开机自启已关闭!")
 			else
-				-- 开启自启（自动检测系统类型）
-				local method = enableAutoStart()
+				-- 开启自启
+				enableAutoStart()
 				saveConfig()
-				if method == "rc" then
-					print(" 开机自启已开启! (rc 服务 / OpenOS)")
-				else
-					print(" 开机自启已开启! (autorun / 通用)")
-				end
+				print(" 开机自启已开启! (.shrc)")
 			end
 			os.sleep(1.5)
 		elseif input == "8" then
@@ -899,16 +865,15 @@ local function runInstaller()
 	if sys.version and #sys.version > 0 then
 		sysDisplay = sysDisplay .. " " .. sys.version
 	end
-	local methodDisplay = sys.method == "rc" and "rc 服务 (OpenOS)" or "autorun (通用)"
 	print(" 检测到系统: " .. sysDisplay)
-	print(" 自启方式:   " .. methodDisplay)
+	print(" 自启方式:   .shrc (shell 启动脚本)")
 	print("")
 	print(" 是否设置开机自动启动服务器?")
 	print(" [1] 不设置 (手动运行)")
-	print(" [2] 自动设置自启 (推荐)")
+	print(" [2] 设置自启 (推荐)")
 	print("     ✓  不修改 BIOS，完全安全")
 	print("     ✓  主菜单中可随时开关自启")
-	print("     ✓  不影响系统正常启动")
+	print("     ✓  退出服务器后正常进入系统")
 	print("")
 	io.write(" 请选择 [2]: ")
 	local bootChoice = io.read()
@@ -917,14 +882,10 @@ local function runInstaller()
 	end
 
 	if bootChoice == "2" then
-		local usedMethod = enableAutoStart()
+		enableAutoStart()
 		saveConfig()
 		print("")
-		if usedMethod == "rc" then
-			print(" ✓ 已设置 rc 服务自启 (OpenOS)")
-		else
-			print(" ✓ 已设置 autorun 自启 (通用)")
-		end
+		print(" ✓ 已设置开机自启 (.shrc)")
 		print(" (可在主菜单→配置中随时开关)")
 		os.sleep(1.5)
 	else
@@ -950,12 +911,7 @@ local function runInstaller()
 	print(" 服务器名称: " .. config.serverName)
 	print(" 端口:       " .. config.port)
 	print(" 密码:       " .. (#config.password > 0 and "已设置" or "无"))
-	local autoStartDisplay = "无"
-	if config.autoStart == "rc" then
-		autoStartDisplay = "rc 服务 (OpenOS)"
-	elseif config.autoStart == "autorun" then
-		autoStartDisplay = "autorun (通用)"
-	end
+	local autoStartDisplay = config.autoStart == "shrc" and ".shrc" or "无"
 	print(" 自启方式:   " .. autoStartDisplay)
 	print("")
 	print("----------------------------------------")
