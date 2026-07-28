@@ -28,6 +28,7 @@ local usersPath = dataPath .. "users.dat"
 local config = {
 	port = 1488,
 	password = "",
+	consolePassword = "admin",
 	serverName = "ChatRoom Server",
 	maxConnections = 50,
 	blacklist = {},
@@ -68,6 +69,21 @@ local function saveConfig()
 		f:write(serialization.serialize(config))
 		f:close()
 	end
+end
+
+-- 验证控制台密码（用于危险操作）
+local function verifyConsolePassword()
+	if not config.consolePassword or #config.consolePassword == 0 then
+		return true  -- 没设控制台密码就不验证（不应该出现）
+	end
+	io.write("\n 请输入控制台密码: ")
+	local input = io.read()
+	if input ~= config.consolePassword then
+		print(" 密码错误!")
+		os.sleep(1.5)
+		return false
+	end
+	return true
 end
 
 local function loadUsers()
@@ -377,49 +393,42 @@ end
 -- ===== 自启动核心 =====
 -- 统一使用 .shrc 方案：在 shell 启动时运行 server.lua
 -- 只有一个进程，不会出现终端争抢问题
--- server.lua 阻塞 .shrc → shell 不启动 → 退出服务器后 shell 正常启动
 
--- 启动脚本路径
-local autostartScript = "/etc/chatroom_autostart.lua"
 local shrcPath = os.getenv("HOME") and (os.getenv("HOME") .. "/.shrc") or "/.shrc"
+local autostartTag = "chatroom_autostart"
 
--- 写启动脚本
-local function writeAutoStartScript(fullPath)
-	local sf = io.open(autostartScript, "w")
-	if sf then
-		sf:write("-- ChatRoom server autostart\n")
-		sf:write("local cfgPath = \"/etc/chatroom/config.cfg\"\n")
-		sf:write("local srvPath = \"" .. fullPath .. "\"\n")
-		sf:write("local f = io.open(cfgPath, \"r\")\n")
-		sf:write("if f then\n")
-		sf:write("  local c = f:read(\"*a\")\n")
-		sf:write("  f:close()\n")
-		sf:write("  local ok, cfg = pcall(function() return load(\"return \"..c)() end)\n")
-		sf:write("  if ok and cfg and (cfg.autoStart == \"shrc\" or cfg.autoStart == true) then\n")
-		-- 直接 dofile，在 shell 主线程中运行，不会创建新进程
-		sf:write("    local srv = loadfile(srvPath)\n")
-		sf:write("    if srv then pcall(srv) end\n")
-		sf:write("  end\n")
-		sf:write("end\n")
-		sf:close()
-	end
-end
-
--- 在 .shrc 中添加引用
-local function addToShrc()
+-- 在 .shrc 中写入完整启动代码（不引用外部文件，避免路径问题）
+local function addToShrc(fullPath)
 	local existing = ""
 	local af = io.open(shrcPath, "r")
 	if af then
 		existing = af:read("*a")
 		af:close()
 	end
-	if not existing:find("chatroom_autostart", 1, true) then
+	-- 检查是否已包含引用
+	if not existing:find(autostartTag, 1, true) then
 		af = io.open(shrcPath, "a")
 		if af then
 			if #existing > 0 and not existing:sub(-1):match("[\r\n]") then
 				af:write("\n")
 			end
-			af:write("pcall(dofile, \"" .. autostartScript .. "\")\n")
+			-- 直接在 .shrc 中写完整代码，不 dofile 外部文件
+			af:write("-- " .. autostartTag .. " begin\n")
+			af:write("do\n")
+			af:write("  local cfgPath = \"/etc/chatroom/config.cfg\"\n")
+			af:write("  local srvPath = \"" .. fullPath .. "\"\n")
+			af:write("  local f = io.open(cfgPath, \"r\")\n")
+			af:write("  if f then\n")
+			af:write("    local c = f:read(\"*a\")\n")
+			af:write("    f:close()\n")
+			af:write("    local ok, cfg = pcall(function() return load(\"return \"..c)() end)\n")
+			af:write("    if ok and cfg and (cfg.autoStart == \"shrc\" or cfg.autoStart == true) then\n")
+			af:write("      local srv = loadfile(srvPath)\n")
+			af:write("      if srv then pcall(srv) end\n")
+			af:write("    end\n")
+			af:write("  end\n")
+			af:write("end\n")
+			af:write("-- " .. autostartTag .. " end\n")
 			af:close()
 		end
 	end
@@ -431,32 +440,22 @@ local function removeFromShrc()
 	if not af then return end
 	local content = af:read("*a")
 	af:close()
-	local lines = {}
-	for line in content:gmatch("[^\r\n]+") do
-		if not line:find("chatroom_autostart", 1, true) then
-			table.insert(lines, line)
-		end
-	end
+	-- 移除 begin 到 end 之间的代码块
+	local result = content:gsub("-- " .. autostartTag .. " begin\n.--- " .. autostartTag .. " end\n?", "")
 	af = io.open(shrcPath, "w")
 	if af then
-		if #lines > 0 then
-			af:write(table.concat(lines, "\n") .. "\n")
-		else
-			af:write("")
-		end
+		af:write(result)
 		af:close()
 	end
 end
 
 -- 清理旧的 rc/autorun 文件
 local function cleanupOldAutoStart()
-	-- 删除 rc 脚本
-	for _, f in ipairs({"/etc/rc.d/chatroom.lua", "/etc/rc.d/chatroom"}) do
+	for _, f in ipairs({"/etc/rc.d/chatroom.lua", "/etc/rc.d/chatroom", "/etc/chatroom_autostart.lua"}) do
 		if filesystem.exists(f) then
 			filesystem.remove(f)
 		end
 	end
-	-- 从 rc 启用列表中移除
 	local ok, rc = pcall(require, "rc")
 	if ok and rc then
 		pcall(function() rc.disable("chatroom") end)
@@ -484,8 +483,7 @@ end
 local function enableAutoStart()
 	local fullPath, scriptDir = getScriptPath()
 	cleanupOldAutoStart()
-	writeAutoStartScript(fullPath)
-	addToShrc()
+	addToShrc(fullPath)
 	config.autoStart = "shrc"
 	return "shrc"
 end
@@ -542,13 +540,14 @@ local function drawConfigMenu()
 	print(" === 配置管理 ===")
 	print("")
 	print(" [1] 修改服务器名称")
-	print(" [2] 设置连接密码")
+	print(" [2] 设置连接密码" .. (config.password == "" and " (当前: 无)" or " (当前: 已设置)"))
 	print(" [3] 修改端口")
 	print(" [4] 设置最大连接数")
 	print(" [5] 管理黑名单")
 	print(" [6] 关机重启广播: " .. (config.broadcastShutdown and "开启" or "关闭"))
 	print(" [7] 开机自启: " .. (config.autoStart == "shrc" and "开启" or "关闭"))
-	print(" [8] 返回")
+	print(" [8] 修改控制台密码")
+	print(" [9] 返回")
 	print("")
 	io.write(" > ")
 end
@@ -588,13 +587,25 @@ local function handleConfigMenu()
 				os.sleep(1)
 			end
 		elseif input == "2" then
-			io.write(" 新密码 (留空则无密码): ")
+			-- 设置连接密码：如果已有密码，先验证旧密码
+			if config.password and #config.password > 0 then
+				io.write(" 请输入当前密码: ")
+				local oldPass = io.read()
+				if oldPass ~= config.password then
+					print(" 密码错误!")
+					os.sleep(1.5)
+					goto continue
+				end
+			end
+			io.write(" 新密码 (留空则取消密码): ")
 			local pass = io.read()
 			config.password = pass or ""
 			saveConfig()
-			print(" 已保存!")
+			print(" 已保存! " .. (#config.password > 0 and "密码已设置" or "密码已取消"))
 			os.sleep(1)
 		elseif input == "3" then
+			-- 修改端口：危险操作，需要控制台密码
+			if not verifyConsolePassword() then goto continue end
 			io.write(" 新端口 (1-65535): ")
 			local port = tonumber(io.read())
 			if port and port > 0 and port < 65536 then
@@ -653,6 +664,8 @@ local function handleConfigMenu()
 			print(" 关机重启广播已" .. (config.broadcastShutdown and "开启" or "关闭") .. "!")
 			os.sleep(1)
 		elseif input == "7" then
+			-- 开机自启：危险操作，需要控制台密码
+			if not verifyConsolePassword() then goto continue end
 			if config.autoStart == "shrc" or config.autoStart == true then
 				-- 关闭自启
 				disableAutoStart()
@@ -666,8 +679,33 @@ local function handleConfigMenu()
 			end
 			os.sleep(1.5)
 		elseif input == "8" then
+			-- 修改控制台密码：需要验证旧密码
+			if config.consolePassword and #config.consolePassword > 0 then
+				io.write(" 请输入当前控制台密码: ")
+				local oldPass = io.read()
+				if oldPass ~= config.consolePassword then
+					print(" 密码错误!")
+					os.sleep(1.5)
+					goto continue
+				end
+			end
+			while true do
+				io.write(" 新控制台密码 (不能为空): ")
+				local newPass = io.read()
+				if newPass and #newPass > 0 then
+					config.consolePassword = newPass
+					saveConfig()
+					print(" 控制台密码已修改!")
+					break
+				else
+					print(" 控制台密码不能为空，请重新输入!")
+				end
+			end
+			os.sleep(1)
+		elseif input == "9" then
 			break
 		end
+		::continue::
 	end
 end
 
@@ -799,7 +837,7 @@ local function runInstaller()
 
 	clearScreen()
 	print("========================================")
-	print("   步骤 1/4: 服务器名称")
+	print("   步骤 1/5: 服务器名称")
 	print("========================================")
 	print("")
 	print(" 给你的服务器起个名字吧。")
@@ -817,7 +855,7 @@ local function runInstaller()
 
 	clearScreen()
 	print("========================================")
-	print("   步骤 2/4: 端口设置")
+	print("   步骤 2/5: 端口设置")
 	print("========================================")
 	print("")
 	print(" 设置服务器监听的端口号。")
@@ -836,7 +874,7 @@ local function runInstaller()
 
 	clearScreen()
 	print("========================================")
-	print("   步骤 3/4: 连接密码")
+	print("   步骤 3/5: 连接密码")
 	print("========================================")
 	print("")
 	print(" 设置连接密码，客户端需要输入正确密码")
@@ -856,7 +894,30 @@ local function runInstaller()
 
 	clearScreen()
 	print("========================================")
-	print("   步骤 4/4: 开机自启")
+	print("   步骤 4/5: 控制台密码")
+	print("========================================")
+	print("")
+	print(" 控制台密码用于保护危险操作")
+	print(" (如修改端口、开关自启等)")
+	print(" 此密码不能为空!")
+	print("")
+	while true do
+		io.write(" 控制台密码 [admin]: ")
+		local cpass = io.read()
+		if not cpass or #cpass == 0 then
+			config.consolePassword = "admin"
+		else
+			config.consolePassword = cpass
+		end
+		break
+	end
+	print("")
+	print(" ✓ 控制台密码已设置")
+	os.sleep(0.5)
+
+	clearScreen()
+	print("========================================")
+	print("   步骤 5/5: 开机自启")
 	print("========================================")
 	print("")
 	-- 自动检测系统类型
@@ -908,9 +969,11 @@ local function runInstaller()
 		sysDisplay = sysDisplay .. " " .. sys.version
 	end
 	print(" 系统:       " .. sysDisplay)
+	print(" 版本:       ChatRoom Server v" .. VERSION)
 	print(" 服务器名称: " .. config.serverName)
 	print(" 端口:       " .. config.port)
 	print(" 密码:       " .. (#config.password > 0 and "已设置" or "无"))
+	print(" 控制台密码: 已设置")
 	local autoStartDisplay = config.autoStart == "shrc" and ".shrc" or "无"
 	print(" 自启方式:   " .. autoStartDisplay)
 	print("")
