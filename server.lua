@@ -374,7 +374,7 @@ end
 
 -- 设置 rc 自启
 -- 按官方文档：/etc/rc.d/chatroom.lua，定义全局 start 函数
--- start 直接 os.execute 阻塞，退出服务器后才进入 shell
+-- 用 loadfile 直接在当前进程中运行，避免 os.execute 创建新进程导致终端冲突
 local function setupRC(fullPath, scriptDir)
 	local ok, rc = pcall(require, "rc")
 	if not ok or not rc then return false end
@@ -398,7 +398,12 @@ local function setupRC(fullPath, scriptDir)
 		rf:write("  local ok, cfg = pcall(function() return load(\"return \"..c)() end)\n")
 		rf:write("  if not ok or not cfg then return end\n")
 		rf:write("  if cfg.autoStart == \"rc\" or cfg.autoStart == true then\n")
-		rf:write("    os.execute(srvPath)\n")
+		-- 用 loadfile 而非 os.execute，直接在当前进程运行
+		-- 避免 shell 进程和 server.lua 争抢终端
+		rf:write("    local srv, err = loadfile(srvPath)\n")
+		rf:write("    if srv then\n")
+		rf:write("      pcall(srv)\n")
+		rf:write("    end\n")
 		rf:write("  end\n")
 		rf:write("end\n")
 		rf:write("\n")
