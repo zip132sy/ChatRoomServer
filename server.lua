@@ -373,38 +373,42 @@ local function getScriptPath()
 end
 
 -- 设置 rc 自启
--- OpenOS rc 脚本格式：返回表，包含 start 函数
+-- 按官方文档：/etc/rc.d/chatroom.lua，定义全局 start 函数
+-- start 直接 os.execute 阻塞，退出服务器后才进入 shell
 local function setupRC(fullPath, scriptDir)
 	local ok, rc = pcall(require, "rc")
 	if not ok or not rc then return false end
 	if not filesystem.exists("/etc/rc.d") then
 		filesystem.makeDirectory("/etc/rc.d")
 	end
-	local rcPath = "/etc/rc.d/chatroom"
+	-- 文件名必须有 .lua 后缀
+	local rcPath = "/etc/rc.d/chatroom.lua"
 	local rf = io.open(rcPath, "w")
 	if rf then
-		-- 配置文件固定在 /etc/chatroom/config.cfg
+		-- 全局函数，不用 local，不返回表
 		rf:write("-- ChatRoom server rc script\n")
 		rf:write("local cfgPath = \"/etc/chatroom/config.cfg\"\n")
 		rf:write("local srvPath = \"" .. fullPath .. "\"\n")
-		rf:write("return {\n")
-		rf:write("  start = function()\n")
-		rf:write("    local f = io.open(cfgPath, \"r\")\n")
-		rf:write("    if not f then return end\n")
-		rf:write("    local c = f:read(\"*a\")\n")
-		rf:write("    f:close()\n")
-		rf:write("    local ok, cfg = pcall(function() return load(\"return \"..c)() end)\n")
-		rf:write("    if not ok or not cfg then return end\n")
-		rf:write("    if cfg.autoStart == \"rc\" or cfg.autoStart == true then\n")
-		rf:write("      require(\"thread\").create(function()\n")
-		rf:write("        os.execute(srvPath)\n")
-		rf:write("      end):detach()\n")
-		rf:write("    end\n")
-		rf:write("  end,\n")
-		rf:write("  stop = function() end,\n")
-		rf:write("  status = function() return \"running\" end\n")
-		rf:write("}\n")
+		rf:write("\n")
+		rf:write("function start()\n")
+		rf:write("  local f = io.open(cfgPath, \"r\")\n")
+		rf:write("  if not f then return end\n")
+		rf:write("  local c = f:read(\"*a\")\n")
+		rf:write("  f:close()\n")
+		rf:write("  local ok, cfg = pcall(function() return load(\"return \"..c)() end)\n")
+		rf:write("  if not ok or not cfg then return end\n")
+		rf:write("  if cfg.autoStart == \"rc\" or cfg.autoStart == true then\n")
+		rf:write("    os.execute(srvPath)\n")
+		rf:write("  end\n")
+		rf:write("end\n")
+		rf:write("\n")
+		rf:write("function stop()\n")
+		rf:write("end\n")
 		rf:close()
+	end
+	-- 删除旧的无后缀文件
+	if filesystem.exists("/etc/rc.d/chatroom") then
+		filesystem.remove("/etc/rc.d/chatroom")
 	end
 	pcall(function() rc.enable("chatroom") end)
 	return true
