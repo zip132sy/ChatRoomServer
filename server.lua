@@ -295,15 +295,55 @@ end
 
 -- ===== 自动启动管理 =====
 
--- 自动检测系统类型，返回最佳自启动方式
-local function detectAutoStartMethod()
-	-- 优先检查 rc 库（OpenOS）
+-- 检测系统类型和版本
+local systemInfo = nil
+local function getSystemInfo()
+	if systemInfo then return systemInfo end
+	systemInfo = { name = "Unknown", version = "", method = "autorun" }
+
+	-- 读取 /etc/os-release（OpenOS 和 Plan9k 都可能有）
+	local f = io.open("/etc/os-release", "r")
+	if f then
+		local content = f:read("*a")
+		f:close()
+		-- 解析 NAME= 和 VERSION= 字段
+		local name = content:match("NAME%s*=%s*\"?([^\n\"]+)\"?")
+		local version = content:match("VERSION%s*=%s*\"?([^\n\"]+)\"?")
+		if name then systemInfo.name = name end
+		if version then systemInfo.version = version end
+	end
+
+	-- 如果没有 os-release，尝试其他方式检测
+	if systemInfo.name == "Unknown" then
+		-- Plan9k: 检查 package 库或特定文件
+		local ok, pkg = pcall(require, "package")
+		if ok and pkg and filesystem.exists("/lib/core") then
+			systemInfo.name = "Plan9k"
+		elseif filesystem.exists("/init.lua") then
+			systemInfo.name = "OpenOS"
+		end
+		-- 尝试获取版本
+		if systemInfo.name == "OpenOS" then
+			local vf = io.open("/etc/release", "r")
+			if vf then
+				systemInfo.version = (vf:read("*l") or ""):match("[%d.]+") or ""
+				vf:close()
+			end
+		end
+	end
+
+	-- 检测自启动方式
 	local ok, rc = pcall(require, "rc")
 	if ok and rc and rc.enable then
-		return "rc"
+		systemInfo.method = "rc"
 	end
-	-- 通用方案：autorun.lua（Plan9k、OpenOS 等都支持）
-	return "autorun"
+
+	return systemInfo
+end
+
+-- 自动检测系统类型，返回最佳自启动方式
+local function detectAutoStartMethod()
+	return getSystemInfo().method
 end
 
 -- 获取 server.lua 的完整路径
@@ -452,10 +492,16 @@ local function clearScreen()
 end
 
 local function drawHeader()
+	local sys = getSystemInfo()
+	local sysDisplay = sys.name
+	if sys.version and #sys.version > 0 then
+		sysDisplay = sysDisplay .. " " .. sys.version
+	end
 	clearScreen()
 	print("========================================")
 	print("       ChatRoom Server v1.0             ")
 	print("========================================")
+	print(" 系统:   " .. sysDisplay)
 	print(" 地址:")
 	print("  " .. modem.address)
 	print(" 端口:   " .. tostring(config.port))
@@ -807,9 +853,14 @@ local function runInstaller()
 	print("========================================")
 	print("")
 	-- 自动检测系统类型
-	local method = detectAutoStartMethod()
-	local systemName = method == "rc" and "OpenOS (rc)" or "通用 (autorun)"
-	print(" 检测到系统: " .. systemName)
+	local sys = getSystemInfo()
+	local sysDisplay = sys.name
+	if sys.version and #sys.version > 0 then
+		sysDisplay = sysDisplay .. " " .. sys.version
+	end
+	local methodDisplay = sys.method == "rc" and "rc 服务 (OpenOS)" or "autorun (通用)"
+	print(" 检测到系统: " .. sysDisplay)
+	print(" 自启方式:   " .. methodDisplay)
 	print("")
 	print(" 是否设置开机自动启动服务器?")
 	print(" [1] 不设置 (手动运行)")
@@ -849,10 +900,22 @@ local function runInstaller()
 	print("   安装完成!")
 	print("========================================")
 	print("")
+	local sys = getSystemInfo()
+	local sysDisplay = sys.name
+	if sys.version and #sys.version > 0 then
+		sysDisplay = sysDisplay .. " " .. sys.version
+	end
+	print(" 系统:       " .. sysDisplay)
 	print(" 服务器名称: " .. config.serverName)
 	print(" 端口:       " .. config.port)
 	print(" 密码:       " .. (#config.password > 0 and "已设置" or "无"))
-	print(" 自启方式:   " .. (config.autoStart or "none"))
+	local autoStartDisplay = "无"
+	if config.autoStart == "rc" then
+		autoStartDisplay = "rc 服务 (OpenOS)"
+	elseif config.autoStart == "autorun" then
+		autoStartDisplay = "autorun (通用)"
+	end
+	print(" 自启方式:   " .. autoStartDisplay)
 	print("")
 	print("----------------------------------------")
 	print(" 服务器地址 (给客户端连接用):")
