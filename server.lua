@@ -301,41 +301,54 @@ local function getSystemInfo()
 	if systemInfo then return systemInfo end
 	systemInfo = { name = "Unknown", version = "", method = "autorun" }
 
-	-- 读取 /etc/os-release（OpenOS 和 Plan9k 都可能有）
+	-- 1. 先检测 rc 库（OpenOS 特有，最可靠）
+	local hasRC = false
+	local ok, rc = pcall(require, "rc")
+	if ok and rc and rc.enable then
+		hasRC = true
+		systemInfo.method = "rc"
+	end
+
+	-- 2. 读取 /etc/os-release（OpenOS 和 Plan9k 都可能有）
 	local f = io.open("/etc/os-release", "r")
 	if f then
 		local content = f:read("*a")
 		f:close()
-		-- 解析 NAME= 和 VERSION= 字段
 		local name = content:match("NAME%s*=%s*\"?([^\n\"]+)\"?")
 		local version = content:match("VERSION%s*=%s*\"?([^\n\"]+)\"?")
 		if name then systemInfo.name = name end
 		if version then systemInfo.version = version end
 	end
 
-	-- 如果没有 os-release，尝试其他方式检测
+	-- 3. 如果还没识别出来，用更可靠的标识判断
 	if systemInfo.name == "Unknown" then
-		-- Plan9k: 检查 package 库或特定文件
-		local ok, pkg = pcall(require, "package")
-		if ok and pkg and filesystem.exists("/lib/core") then
+		if hasRC then
+			-- 有 rc 库一定是 OpenOS
+			systemInfo.name = "OpenOS"
+		elseif filesystem.exists("/bin/oppm") or filesystem.exists("/usr/bin/oppm") then
+			-- oppm 是 Plan9k 特有的包管理器
 			systemInfo.name = "Plan9k"
 		elseif filesystem.exists("/init.lua") then
+			-- OpenOS 的启动文件
 			systemInfo.name = "OpenOS"
-		end
-		-- 尝试获取版本
-		if systemInfo.name == "OpenOS" then
-			local vf = io.open("/etc/release", "r")
-			if vf then
-				systemInfo.version = (vf:read("*l") or ""):match("[%d.]+") or ""
-				vf:close()
-			end
 		end
 	end
 
-	-- 检测自启动方式
-	local ok, rc = pcall(require, "rc")
-	if ok and rc and rc.enable then
-		systemInfo.method = "rc"
+	-- 4. 获取版本信息
+	if #systemInfo.version == 0 then
+		-- OpenOS: 读 /etc/release
+		local vf = io.open("/etc/release", "r")
+		if vf then
+			systemInfo.version = (vf:read("*l") or ""):match("[%d.]+") or ""
+			vf:close()
+		end
+		-- 如果还是空，用 _OSVERSION 或 os.version
+		if #systemInfo.version == 0 then
+			local ver = _OSVERSION or (os and os.version)
+			if type(ver) == "string" then
+				systemInfo.version = ver:match("[%d.]+") or ver
+			end
+		end
 	end
 
 	return systemInfo
