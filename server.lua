@@ -293,6 +293,158 @@ local function handleMessage(eventName, localAddr, remoteAddr, port, distance, m
 	end
 end
 
+-- ===== 自动启动管理 =====
+
+-- 自动检测系统类型，返回最佳自启动方式
+local function detectAutoStartMethod()
+	-- 优先检查 rc 库（OpenOS）
+	local ok, rc = pcall(require, "rc")
+	if ok and rc and rc.enable then
+		return "rc"
+	end
+	-- 通用方案：autorun.lua（Plan9k、OpenOS 等都支持）
+	return "autorun"
+end
+
+-- 获取 server.lua 的完整路径
+local function getScriptPath()
+	local scriptDir = filesystem.path(os.getenv("_") or "server.lua") or ""
+	local fullPath = scriptDir .. "server.lua"
+	if not fullPath:match("^/") then
+		local curDir = os.getenv("PWD") or ""
+		if curDir ~= "" then
+			fullPath = curDir .. "/" .. fullPath
+		end
+	end
+	return fullPath, scriptDir
+end
+
+-- 设置 rc 自启
+local function setupRC(fullPath, scriptDir)
+	local ok, rc = pcall(require, "rc")
+	if not ok or not rc then return false end
+	if not filesystem.exists("/etc/rc.d") then
+		filesystem.makeDirectory("/etc/rc.d")
+	end
+	local rcPath = "/etc/rc.d/chatroom"
+	local rf = io.open(rcPath, "w")
+	if rf then
+		rf:write("-- ChatRoom server rc script\n")
+		rf:write("local cfgPath = \"" .. scriptDir .. "config.cfg\"\n")
+		rf:write("local f = io.open(cfgPath, \"r\")\n")
+		rf:write("if f then\n")
+		rf:write("  local c = f:read(\"*a\")\n")
+		rf:write("  f:close()\n")
+		rf:write("  local ok, cfg = pcall(function() return load(\"return \"..c)() end)\n")
+		rf:write("  if ok and cfg and (cfg.autoStart == \"rc\" or cfg.autoStart == true) then\n")
+		rf:write("    os.execute(\"" .. fullPath .. " &\")\n")
+		rf:write("  end\n")
+		rf:write("end\n")
+		rf:close()
+	end
+	pcall(function() rc.enable("chatroom") end)
+	return true
+end
+
+-- 设置 autorun 自启（通用方案）
+local function setupAutorun(fullPath, scriptDir)
+	-- 写启动脚本到单独文件
+	local scriptPath = "/etc/chatroom_autostart.lua"
+	local sf = io.open(scriptPath, "w")
+	if sf then
+		sf:write("-- ChatRoom server autostart\n")
+		sf:write("local cfgPath = \"" .. scriptDir .. "config.cfg\"\n")
+		sf:write("local f = io.open(cfgPath, \"r\")\n")
+		sf:write("if f then\n")
+		sf:write("  local c = f:read(\"*a\")\n")
+		sf:write("  f:close()\n")
+		sf:write("  local ok, cfg = pcall(function() return load(\"return \"..c)() end)\n")
+		sf:write("  if ok and cfg and (cfg.autoStart == \"autorun\" or cfg.autoStart == true) then\n")
+		sf:write("    os.execute(\"" .. fullPath .. " &\")\n")
+		sf:write("  end\n")
+		sf:write("end\n")
+		sf:close()
+	end
+	-- 在 /autorun.lua 中添加引用（不覆盖已有内容）
+	local autorunPath = "/autorun.lua"
+	local existing = ""
+	local af = io.open(autorunPath, "r")
+	if af then
+		existing = af:read("*a")
+		af:close()
+	end
+	-- 检查是否已包含引用
+	if not existing:find("chatroom_autostart", 1, true) then
+		af = io.open(autorunPath, "a")
+		if af then
+			if #existing > 0 and not existing:sub(-1):match("[\r\n]") then
+				af:write("\n")
+			end
+			af:write("pcall(dofile, \"/etc/chatroom_autostart.lua\")\n")
+			af:close()
+		end
+	end
+	return true
+end
+
+-- 关闭 rc 自启
+local function disableRC()
+	local ok, rc = pcall(require, "rc")
+	if ok and rc then
+		pcall(function() rc.disable("chatroom") end)
+	end
+end
+
+-- 关闭 autorun 自启（从 /autorun.lua 中移除引用）
+local function disableAutorun()
+	local autorunPath = "/autorun.lua"
+	local af = io.open(autorunPath, "r")
+	if not af then return end
+	local content = af:read("*a")
+	af:close()
+	-- 移除包含 chatroom_autostart 的行
+	local lines = {}
+	for line in content:gmatch("[^\r\n]+") do
+		if not line:find("chatroom_autostart", 1, true) then
+			table.insert(lines, line)
+		end
+	end
+	local newContent = table.concat(lines, "\n")
+	af = io.open(autorunPath, "w")
+	if af then
+		if #newContent > 0 then
+			af:write(newContent .. "\n")
+		else
+			af:write("")
+		end
+		af:close()
+	end
+end
+
+-- 统一设置自启（自动检测系统类型）
+local function enableAutoStart()
+	local method = detectAutoStartMethod()
+	local fullPath, scriptDir = getScriptPath()
+	if method == "rc" then
+		setupRC(fullPath, scriptDir)
+		config.autoStart = "rc"
+	else
+		setupAutorun(fullPath, scriptDir)
+		config.autoStart = "autorun"
+	end
+	return method
+end
+
+-- 统一关闭自启
+local function disableAutoStart()
+	if config.autoStart == "rc" then
+		disableRC()
+	elseif config.autoStart == "autorun" then
+		disableAutorun()
+	end
+	config.autoStart = "none"
+end
+
 -- ===== 终端UI =====
 local function clearScreen()
 	term.clear()
@@ -338,7 +490,7 @@ local function drawConfigMenu()
 	print(" [4] 设置最大连接数")
 	print(" [5] 管理黑名单")
 	print(" [6] 关机重启广播: " .. (config.broadcastShutdown and "开启" or "关闭"))
-	print(" [7] 开机自启: " .. ((config.autoStart == "rc" or config.autoStart == true) and "开启" or "关闭"))
+	print(" [7] 开机自启: " .. (config.autoStart == "rc" and "开启 (rc)" or (config.autoStart == "autorun" and "开启 (autorun)" or "关闭")))
 	print(" [8] 返回")
 	print("")
 	io.write(" > ")
@@ -444,51 +596,19 @@ local function handleConfigMenu()
 			print(" 关机重启广播已" .. (config.broadcastShutdown and "开启" or "关闭") .. "!")
 			os.sleep(1)
 		elseif input == "7" then
-			local ok, rc = pcall(require, "rc")
-			if config.autoStart == "rc" or config.autoStart == true then
+			if config.autoStart == "rc" or config.autoStart == "autorun" or config.autoStart == true then
 				-- 关闭自启
-				config.autoStart = "none"
-				if ok and rc then
-					pcall(function() rc.disable("chatroom") end)
-				end
+				disableAutoStart()
 				saveConfig()
 				print(" 开机自启已关闭!")
 			else
-				-- 开启自启
-				if ok and rc then
-					-- 获取脚本路径
-					local scriptDir = filesystem.path(os.getenv("_") or "server.lua") or ""
-					local fullPath = scriptDir .. "server.lua"
-					if not fullPath:match("^/") then
-						local curDir = os.getenv("PWD") or ""
-						if curDir ~= "" then
-							fullPath = curDir .. "/" .. fullPath
-						end
-					end
-					if not filesystem.exists("/etc/rc.d") then
-						filesystem.makeDirectory("/etc/rc.d")
-					end
-					local rcScriptPath = "/etc/rc.d/chatroom"
-					local rf = io.open(rcScriptPath, "w")
-					if rf then
-						rf:write("local cfgPath = \"" .. scriptDir .. "config.cfg\"\n")
-						rf:write("local f = io.open(cfgPath, \"r\")\n")
-						rf:write("if f then\n")
-						rf:write("  local c = f:read(\"*a\")\n")
-						rf:write("  f:close()\n")
-						rf:write("  local ok, cfg = pcall(function() return load(\"return \"..c)() end)\n")
-						rf:write("  if ok and cfg and (cfg.autoStart == \"rc\" or cfg.autoStart == true) then\n")
-						rf:write("    os.execute(\"" .. fullPath .. " &\")\n")
-						rf:write("  end\n")
-						rf:write("end\n")
-						rf:close()
-					end
-					pcall(function() rc.enable("chatroom") end)
-					config.autoStart = "rc"
-					saveConfig()
-					print(" 开机自启已开启!")
+				-- 开启自启（自动检测系统类型）
+				local method = enableAutoStart()
+				saveConfig()
+				if method == "rc" then
+					print(" 开机自启已开启! (rc 服务 / OpenOS)")
 				else
-					print(" 无法设置! rc 库不可用 (需 OpenOS)")
+					print(" 开机自启已开启! (autorun / 通用)")
 				end
 			end
 			os.sleep(1.5)
@@ -686,71 +806,35 @@ local function runInstaller()
 	print("   步骤 4/4: 开机自启")
 	print("========================================")
 	print("")
+	-- 自动检测系统类型
+	local method = detectAutoStartMethod()
+	local systemName = method == "rc" and "OpenOS (rc)" or "通用 (autorun)"
+	print(" 检测到系统: " .. systemName)
+	print("")
 	print(" 是否设置开机自动启动服务器?")
 	print(" [1] 不设置 (手动运行)")
-	print(" [2] 使用 rc 服务自启 (推荐)")
+	print(" [2] 自动设置自启 (推荐)")
 	print("     ✓  不修改 BIOS，完全安全")
 	print("     ✓  主菜单中可随时开关自启")
 	print("     ✓  不影响系统正常启动")
 	print("")
-	io.write(" 请选择 [1]: ")
+	io.write(" 请选择 [2]: ")
 	local bootChoice = io.read()
+	if bootChoice == "" or bootChoice == "2" then
+		bootChoice = "2"
+	end
 
 	if bootChoice == "2" then
-		local ok, rc = pcall(require, "rc")
-		if ok and rc then
-			-- 获取脚本路径
-			local scriptDir = filesystem.path(os.getenv("_") or "server.lua") or ""
-			if scriptDir == "" then
-				scriptDir = filesystem.get(".") and "" or ""
-			end
-			local fullPath = scriptDir .. "server.lua"
-			-- 尝试获取绝对路径
-			if not fullPath:match("^/") then
-				local curDir = os.getenv("PWD") or ""
-				if curDir ~= "" then
-					fullPath = curDir .. "/" .. fullPath
-				end
-			end
-
-			if not filesystem.exists("/etc/rc.d") then
-				filesystem.makeDirectory("/etc/rc.d")
-			end
-			-- rc 脚本：通过配置文件中的 autoStart 标记决定是否启动
-			local rcScriptPath = "/etc/rc.d/chatroom"
-			local rf = io.open(rcScriptPath, "w")
-			if rf then
-				rf:write("-- ChatRoom server rc script\n")
-				rf:write("-- 实际是否启动由服务器配置文件中的 autoStart 字段决定\n")
-				rf:write("local function loadConfig(path)\n")
-				rf:write("  local f = io.open(path, \"r\")\n")
-				rf:write("  if not f then return nil end\n")
-				rf:write("  local c = f:read(\"*a\")\n")
-				rf:write("  f:close()\n")
-				rf:write("  local ok, cfg = pcall(function() return load(\"return \"..c)() end)\n")
-				rf:write("  if ok then return cfg end\n")
-				rf:write("  return nil\n")
-				rf:write("end\n")
-				rf:write("local cfgPath = os.getenv(\"PWD\")..\"/config.cfg\"\n")
-				rf:write("if not filesystem.exists(cfgPath) then\n")
-				rf:write("  cfgPath = \"" .. scriptDir .. "config.cfg\"\n")
-				rf:write("end\n")
-				rf:write("local cfg = loadConfig(cfgPath)\n")
-				rf:write("if cfg and (cfg.autoStart == \"rc\" or cfg.autoStart == true) then\n")
-				rf:write("  os.execute(\"" .. fullPath .. " &\")\n")
-				rf:write("end\n")
-				rf:close()
-			end
-			pcall(function() rc.enable("chatroom") end)
-			config.autoStart = "rc"
-			print("")
-			print(" ✓ 已设置 rc 服务自启")
-			print(" (可在主菜单→配置中随时开关)")
+		local usedMethod = enableAutoStart()
+		saveConfig()
+		print("")
+		if usedMethod == "rc" then
+			print(" ✓ 已设置 rc 服务自启 (OpenOS)")
 		else
-			print("")
-			print(" ✗ 无法设置 rc 服务 (rc 库不可用)")
+			print(" ✓ 已设置 autorun 自启 (通用)")
 		end
-		os.sleep(1)
+		print(" (可在主菜单→配置中随时开关)")
+		os.sleep(1.5)
 	else
 		config.autoStart = "none"
 		print("")
